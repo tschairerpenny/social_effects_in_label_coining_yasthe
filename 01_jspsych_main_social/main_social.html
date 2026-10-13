@@ -169,6 +169,101 @@
              - no Prolific ID: this is a lab study; the pair ID is already stored in every row
              - consider also asking whether the participant knows the other participant (name: 'knows_partner')
            Do not forget to add "demographics" to the timeline in section 8. */
+        var demographics = {
+            type: jsPsychSurvey,
+            pages: [
+                [
+                    {
+                        type: 'html',
+                        prompt: '<p style="color:black;" align="center"><b>Vielen Dank für Ihre Teilnahme an unserem Experiment!</b><br>' +
+                            '<p style="color:black;" align="left">Bevor Sie mit den Anweisungen fortfahren, benötigen wir noch ein paar Angaben zu Ihrer Person. ' +
+                            'Diese Angaben bleiben anonym.',
+                    },
+                    {
+                        type: 'text',
+                        title: 'Ihr Alter (in Jahren):',
+                        name: 'age',
+                        size: 1,
+                        isRequired: true,
+                        inputType: 'text'
+                    },
+                    {
+                        type: 'text',
+                        title: 'Ihr Geschlecht:',
+                        name: 'gender',
+                        isRequired: true,
+                        inputType: 'text'
+                    },
+                    {
+                        type: 'multi-choice',
+                        title: "Sind Sie einsprachig mit Deutsch als einzige Muttersprache aufgewachsen?",
+                        options: ['Ja', 'Nein'],
+                        name: 'monolingual_german',
+                        isRequired: true
+                    },
+                    {
+                        type: 'text',
+                        title: "Ihre Muttersprache(n):",
+                        name: 'nat_lang',
+                        isRequired: true,
+                        inputType: 'text'
+                    },
+                ],
+            ]
+        };
+            /* THIS PART IS WIP, I HAVEN'T LOOKED AT WHAT IT DOES YET: IT'S JUST COPIED FROM THE DEMOGRAPHICS TRIAL IN Exp2_goodness_ratings.html
+
+            button_label_finish: "Weiter",
+
+            on_start: function () {
+                var FIELD_FILTERS = {
+                    age: { test: /[^0-9]/, replace: /[^0-9]/g },
+                    gender: { test: /[^A-Za-zÀ-ÖØ-öø-ÿß\s-]/, replace: /[^A-Za-zÀ-ÖØ-öø-ÿß\s-]/g },
+                    nat_lang: { test: /[^A-Za-zÀ-ÖØ-öø-ÿß\s-]/, replace: /[^A-Za-zÀ-ÖØ-öø-ÿß\s-]/g },
+                };
+                function fieldNameFor(el) {
+                    for (var name in FIELD_FILTERS) {
+                        if (el.matches('[data-name="' + name + '"] input')) return name;
+                    }
+                    return null;
+                }
+                var syncing = false;
+                document.addEventListener('beforeinput', function (e) {
+                    var name = e.target && e.target.matches ? fieldNameFor(e.target) : null;
+                    if (name && e.data && FIELD_FILTERS[name].test.test(e.data)) {
+                        e.preventDefault();
+                    }
+                });
+                document.addEventListener('input', function (e) {
+                    if (syncing) return;
+                    var target = e.target;
+                    var name = target && target.matches ? fieldNameFor(target) : null;
+                    if (!name) return;
+                    var cleaned = target.value.replace(FIELD_FILTERS[name].replace, '');
+                    if (cleaned !== target.value) {
+                        syncing = true;
+                        target.value = cleaned;
+                        target.dispatchEvent(new Event('input', { bubbles: true }));
+                        syncing = false;
+                    }
+                });
+            },
+        };
+
+        var instruction1 = {
+            type: jsPsychHtmlButtonResponse,
+            stimulus: '<div style="text-align:left;">' +
+                '<p align="center"><b>Um Ihre Konzentration sicherzustellen:</b> </p>' +
+                '<t>&nbsp;&nbsp;&nbsp;&nbsp;&bull;<b> schalten Sie Musik</b>/Audio aus, das Sie möglicherweise hören,</p>&nbsp;&nbsp;&nbsp;&nbsp;&bull;' +
+                '<b> verzichten Sie auf das Googeln</b> oder Nachschlagen von Informationen während des Experiments,</p><t>&nbsp;&nbsp;&nbsp;&nbsp;&bull;' +
+                ' stellen Sie Ihr <b>Telefon auf lautlos</b> und legen Sie es mit dem Display nach unten oder außer Reichweite,</p><t>&nbsp;&nbsp;&nbsp;&nbsp;&bull;' +
+                '<b> bleiben Sie bis zum Ende beim Experiment</b>,</p><t>&nbsp;&nbsp;&nbsp;&nbsp;&bull;' +
+                ' verhalten Sie sich allgemein so, als befänden Sie sich in unserem Labor!</p>' +
+                '<p align="left">Diese Schritte helfen uns, qualitativ hochwertige Daten zu erheben.</p><br>' +
+                '<p align="center"><b> Bitte drücken Sie "Weiter", wenn Sie damit einverstanden sind.</b></p>',
+            choices: ['Weiter']
+        };
+        */
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------3. Phase 1 - Grounding (shared)----------------------------------------------------------------------------------------------------------------------------//
