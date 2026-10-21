@@ -1,42 +1,92 @@
-/* ------------------------------------------------------------------------------------------------
-   PAIR SYNCHRONISATION (communication layer) - TO BE IMPLEMENTED
-   The only file in the browser that talks to sync/sync.php. The experiment (main_social.html)
-   must use these functions and never call the server for pair data directly.
-
-   Architecture:  browser A (jsPsych)  <->  sync/sync.php (+ one JSON file per pair)  <->  browser B
-   - A browser WRITES a value with sendValue(); sync.php stores it in sync/state/pair_<ID>.json.
-   - The other browser READS it by polling (asking sync.php every CONFIG.timing.sync_poll_interval_ms).
-   - waitForPartner() = both browsers write "I reached step X" and wait until the other one has too.
-   See README.md for why polling over PHP is used instead of WebSockets or Firebase.
-   ------------------------------------------------------------------------------------------------ */
-
+/* Communication between browsers. Solo tests never contact sync.php.
+   All methods return Promises; getPartnerValue/waitForPartner also accept the existing callbacks.
+   Await sendValue before relying on its value being visible to the partner. */
 var PairSync = {
-
-    // set once at the start of the experiment
-    pairID: null,
-    role: null,        // 'naive' or 'confederate'
+    pairID: null, // test session code or real numeric pair ID (as a string)
+    role: null,
     syncURL: 'sync/sync.php',
+    testMode: false,
+    solo: false,
+    condition: null,
+    values: null,
+    simulatePartner: null,
 
-    // TODO: register this browser for the pair, e.g. PairSync.join(12, 'naive')
-    join: function (pairID, role) {
-        this.pairID = pairID;
+    join: async function (sessionID, role, options) {
+        options = options || {};
+        this.testMode = options.testMode === true;
+        this.solo = options.solo === true;
+        if (this.solo && !this.testMode) throw new Error('Partner simulation is only available in test runs.');
+        if (role !== 'naive' && role !== 'confederate') throw new Error('Invalid role.');
+        var pattern = this.testMode ? /^test-[a-f0-9]{16}$/ : /^[1-9][0-9]*$/;
+        if (!pattern.test(String(sessionID))) throw new Error('Invalid session identifier.');
+        this.pairID = String(sessionID);
         this.role = role;
+        this.condition = options.condition;
+        this.values = Object.create(null);
+        this.simulatePartner = options.simulatePartner;
+        if (this.solo) return { condition: this.condition };
+        var state = await this.request('join', { condition: this.condition || '' });
+        this.condition = state.meta.condition;
+        return state.meta;
     },
 
-    // TODO: store a value for this participant under a key, e.g. sendValue('phase1_label_c3', 'Kreuzhahn').
-    // Should also store a server timestamp.
-    sendValue: function (key, value) {
-        throw new Error('PairSync.sendValue is not implemented yet');
+    request: async function (action, extra) {
+        var response = await fetch(this.syncURL, {
+            method: 'POST',
+            body: new URLSearchParams(Object.assign({
+                action: action,
+                pair: this.pairID,
+                role: this.role,
+                test: this.testMode ? '1' : '0',
+            }, extra)),
+            cache: 'no-store',
+            signal: AbortSignal.timeout(15000),
+        });
+        var state;
+        try {
+            state = await response.json();
+        } catch (error) {
+            throw new Error('Synchronization is unavailable. Please use a PHP server or test alone.');
+        }
+        if (!response.ok || state.error) throw new Error(state.error || 'Synchronization failed.');
+        return state;
     },
 
-    // TODO: wait until the PARTNER has stored a value under this key, then call callback(value).
-    getPartnerValue: function (key, callback) {
-        throw new Error('PairSync.getPartnerValue is not implemented yet');
+    sendValue: async function (key, value) {
+        this.values[key] = value;
+        if (!this.solo) await this.request('set', { key: key, value: JSON.stringify(value) });
     },
 
-    // TODO: barrier - mark this browser as having reached `step` and call callback() once the
-    // partner has reached it too. Used between every step where both must be finished.
-    waitForPartner: function (step, callback) {
-        throw new Error('PairSync.waitForPartner is not implemented yet');
+    getPartnerValue: async function (key, callback) {
+        var value;
+        if (this.solo) {
+            if (typeof this.simulatePartner !== 'function') throw new Error('No partner simulation is configured.');
+            value = await this.simulatePartner(key, {
+                role: this.role, condition: this.condition, ownValues: this.values,
+            });
+        } else {
+            var partner = this.role === 'naive' ? 'confederate' : 'naive';
+            var deadline = Date.now() + (CONFIG.timing.sync_timeout_ms || 300000);
+            while (true) {
+                var state = await this.request('get');
+                if (Object.prototype.hasOwnProperty.call(state[partner], key)) {
+                    value = state[partner][key].value;
+                    break;
+                }
+                if (Date.now() >= deadline) throw new Error('Timed out waiting for the partner: ' + key);
+                await new Promise(function (resolve) { setTimeout(resolve, CONFIG.timing.sync_poll_interval_ms); });
+            }
+        }
+        if (callback) callback(value);
+        return value;
+    },
+
+    waitForPartner: async function (step, callback) {
+        if (!this.solo) {
+            var key = '__ready__:' + step;
+            await this.sendValue(key, true);
+            await this.getPartnerValue(key);
+        }
+        if (callback) callback();
     },
 };

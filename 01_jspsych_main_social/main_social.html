@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="de">
 <!----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
     //--------------------------------------------------------------------------------Setting up-----------------------------------------------------------------------------//
     //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//-->
@@ -7,13 +7,13 @@
     Main experiment: social influence on label adoption (two participants, two computers).
     Read README.md first - it explains the folder structure and how the two browsers communicate.
 
-    How it is started (by the experimenter, on two lab computers):
-      naive participant:   main_social.html?role=naive
-      confederate:         main_social.html?role=confederate&pair=<pair ID shown on the naive computer>
-      test runs:           add &test=1 to both URLs (uses data_test/, ID_management_test/, sync/state_test/)
+    Open main_social.html on each computer. Before handing over the computer, select the run
+    type and role on the setup screens.
+    Test runs never use ID management and offer a local CSV download instead of server saving.
 
     Sections that are already written: 0 (pair ID, role, condition), 1 (fullscreen + consent), 7 (saving).
-    They only work once the infrastructure has been copied in from Exp2 (README.md, "Setting up the infrastructure").
+    Real runs require the infrastructure from Exp2 (README.md, "Setting up the infrastructure").
+    Solo tests work without ID/saving/sync endpoints; paired tests require the PHP sync endpoint.
     Sections marked TODO are for you to implement.
 -->
 
@@ -30,8 +30,6 @@
     <script src="https://unpkg.com/@jspsych/plugin-call-function@1.1.2"></script>
     <script src="https://unpkg.com/@jspsych/plugin-external-html@1.1.2"></script>
     <!-- TODO: add further plugins from jspsych/ as needed (e.g. plugin-image-button-response.js for phase 2) -->
-    <!-- add jquery library (needed for the synchronous ID requests and for saving data) -->
-    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"></script>
     <!-- add style sheets -->
     <link href="jspsych/jspsych.css" rel="stylesheet" type="text/css" />
     <link href="jspsych/survey.css" rel="stylesheet" type="text/css" />
@@ -44,93 +42,127 @@
     <script src="resources/experiment_config.js"></script>
     <!-- communication with the partner's browser - the ONLY place that talks to sync/sync.php -->
     <script src="resources/pair_sync.js"></script>
+    <script src="resources/experiment_setup.js"></script>
+    <style>
+        [hidden] { display: none !important; }
+        #experiment-setup { max-width: 720px; margin: 48px auto; padding: 24px; font: 18px/1.6 sans-serif; }
+        #experiment-setup h1 { font-size: 28px; }
+        #experiment-setup h2 { font-size: 22px; }
+        #experiment-setup fieldset { margin: 20px 0; padding: 16px; }
+        #experiment-setup fieldset label { display: block; margin: 8px 0; }
+        #experiment-setup button, #experiment-setup select, #experiment-setup input[type="text"] {
+            font: inherit; padding: 8px 12px; margin: 4px;
+        }
+        #experiment-setup small { display: block; }
+        #setup-error { color: #a01919; }
+        #test-mode-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+            background: #fff0be; color: #563600; padding: 6px; text-align: center; font: bold 14px sans-serif; }
+    </style>
 </head>
 
-<body></body>
+<body>
+    <main id="experiment-setup" lang="en"></main>
+    <aside id="test-mode-banner" lang="en" hidden></aside>
+    <main id="experiment" hidden></main>
+</body>
 
 <script>
-    /* initialize jsPsych */
-    var jsPsych = initJsPsych({});
+    // Initialized only after the experimenter has completed setup.
+    var jsPsych;
 
     //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
     //----------------------0. Test mode, role, pair ID and condition--------------------------------------------------------------------------------------------------------------//
     //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-    var TEST_MODE = jsPsych.data.getURLVariable('test') === '1';
-    var PATHS = TEST_MODE ? {
-        manageID: 'ID_management_test/manageID_test.php',
-        cleanupID: 'ID_management_test/cleanupID_test.php',
-        saveData: 'save_data_test.php',
-        filePrefix: 'TEST_social_',
-    } : {
+    var LIVE_PATHS = {
         manageID: 'ID_management/manageID_social.php',
         cleanupID: 'ID_management/cleanupID_social.php',
         saveData: 'save_data.php',
         filePrefix: 'social_',
     };
-    // TODO (when implementing pair_sync.js): pass TEST_MODE on to sync.php so test runs
-    // write into sync/state_test/ instead of sync/state/.
 
-    /* ID management: the naive participant's browser draws the next pair ID from the queue
-       (ID_management/IDs_social.txt). The confederate's browser does not draw an ID - the
-       experimenter passes the same pair ID in the URL (?role=confederate&pair=...). The ID is only
-       removed from the queue once the naive participant's data has been saved - see section 7. */
-    function getID(url) {
-        let numID = 0;
-        $.ajax({
-            url: url,
-            type: 'POST',
-            async: false, // blocks until the ID is returned
-            data: {},
-        }).done(function (data) {
-            numID = $.trim(data);
+    async function postText(url, data) {
+        var response = await fetch(url, {
+            method: 'POST',
+            body: new URLSearchParams(data),
+            cache: 'no-store',
+            signal: AbortSignal.timeout(15000),
         });
-        return numID;
+        if (!response.ok) throw new Error('Server request failed: ' + url + ' (' + response.status + ').');
+        return (await response.text()).trim();
     }
 
-    function isEmpty(str) {
-        return (!str || str.length === 0);
-    }
+    async function startExperiment(settings) {
+        var TEST_MODE = settings.testMode;
+        var PATHS = LIVE_PATHS;
+        var role = settings.role; // retain 'naive' internally; display 'Participant' during setup
+        var consentAvailable = false;
+        if (role === 'naive') {
+            try {
+                var consentResponse = await fetch('resources/informedconsent_social_de.html', {
+                    cache: 'no-store', signal: AbortSignal.timeout(15000),
+                });
+                consentAvailable = consentResponse.ok;
+            } catch (error) {
+                // A participant test can run without the still-missing consent form.
+            }
+            if (!TEST_MODE && !consentAvailable) {
+                throw new Error('The consent form is missing or could not be loaded. Please provide resources/informedconsent_social_de.html.');
+            }
+        }
 
-    var role = jsPsych.data.getURLVariable('role');   // 'naive' or 'confederate'
-    var ID = (role === 'naive') ? getID(PATHS.manageID) : jsPsych.data.getURLVariable('pair');
+        var pairID = null; // test sessions do not have a research pair ID
+        var sessionID;
+        var condition;
+        if (TEST_MODE) {
+            sessionID = settings.solo || role === 'naive' ? ExperimentSetup.createTestSession() : settings.pair;
+            condition = settings.condition;
+        } else {
+            var ID = role === 'naive' ? await postText(PATHS.manageID, {}) : settings.pair;
+            if (!ID) throw new Error('Data collection is closed: no pair IDs are available.');
+            if (!/^[1-9][0-9]*$/.test(ID) || !Number.isSafeInteger(Number(ID))) {
+                throw new Error('ID management did not return a valid positive pair ID. Please check the server configuration.');
+            }
+            pairID = Number(ID);
+            sessionID = String(pairID);
+            condition = getCondition(pairID);
+        }
+        var metadata = await PairSync.join(sessionID, role, {
+            testMode: TEST_MODE,
+            solo: settings.solo,
+            condition: condition,
+            simulatePartner: CONFIG.testing.partnerValue,
+        });
+        condition = metadata.condition; // paired test confederate inherits the participant's choice
+        if (!CONFIG.conditions.includes(condition)) throw new Error('Unknown session condition. Please check the configuration on both computers.');
 
-    if ((role !== 'naive' && role !== 'confederate') || (role === 'confederate' && isEmpty(ID))) {
-        jsPsych.run([{
-            type: jsPsychHtmlKeyboardResponse,
-            stimulus: '<p>Fehler: Bitte die Seite mit <b>?role=naive</b> oder <b>?role=confederate&amp;pair=…</b> öffnen.</p>',
-            choices: "NO_KEYS",
-        }]);
-    } else if (isEmpty(ID)) {
-        //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        //----------------------Data collection for this version of the study is over--------------------------------------------------------------------------------------------------//
-        //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        // not "closed": that is a read-only browser global (window.closed)
-        var closed_screen = {
-            type: jsPsychHtmlKeyboardResponse,
-            stimulus: '<div style="width: 1000px;text-align:center;">' +
-                '<p>Leider ist die Datenerhebung für diese Version der Studie bereits abgeschlossen.</p></div>',
-            choices: "NO_KEYS",
-        };
-        jsPsych.run([closed_screen]);
-    } else {
-        var pairID = parseInt(ID);
-        var condition = getCondition(pairID);
-        PairSync.join(pairID, role);
+        jsPsych = initJsPsych({ display_element: 'experiment' });
+        document.getElementById('experiment').hidden = false;
+        document.getElementById('experiment').lang = role === 'naive' ? 'de' : 'en';
+        if (TEST_MODE) {
+            var banner = document.getElementById('test-mode-banner');
+            banner.textContent = 'TEST RUN · ' + (settings.solo ? 'Simulated partner' : 'Two browsers') + ' · ' + sessionID;
+            banner.hidden = false;
+        }
 
         // these columns are added to every row of the data file
         jsPsych.data.addProperties({
             pair_id: pairID,
+            session_id: sessionID,
             role: role,
             condition: condition,
             test_mode: TEST_MODE,
+            connection_mode: settings.solo ? 'solo' : 'paired',
         });
 
         // Shown only to the experimenter before the participant sits down: the pair ID that has to
-        // be entered in the confederate's URL.
+        // be entered on the confederate's setup screen (a temporary session code for paired tests).
         var experimenter_screen = {
             type: jsPsychHtmlButtonResponse,
-            stimulus: '<p>Paar-ID: <b>' + pairID + '</b> &nbsp;|&nbsp; Rolle: <b>' + role + '</b>' +
-                (TEST_MODE ? ' &nbsp;|&nbsp; <b style="color:red;">TESTMODUS</b>' : '') + '</p>',
+            stimulus: '<div lang="en"><p>' + (TEST_MODE ? 'Test session' : 'Pair ID') + ': <b>' + sessionID +
+                '</b></p><p>Role: <b>' + (role === 'naive' ? 'Participant' : 'Confederate') +
+                '</b> | Condition: <b>' + CONFIG.condition_labels[condition] + '</b></p>' +
+                (TEST_MODE && settings.solo ? '<p>The partner is simulated for this test.</p>' :
+                    '<p>Enter the same ' + (TEST_MODE ? 'test session code' : 'pair ID') + ' on the other computer.</p>') + '</div>',
             choices: ['Start'],
             data: { phase: 'setup' },
         };
@@ -141,77 +173,73 @@
         var enter_fullscreen = {
             type: jsPsychFullscreen,
             fullscreen_mode: true,
-            message: '<p><i>Das Experiment wechselt in den Vollbildmodus.</i></p>',
-            button_label: 'Starten',
+            message: role === 'naive' ? '<p><i>Das Experiment wechselt in den Vollbildmodus.</i></p>' :
+                '<p><i>The experiment will enter fullscreen mode.</i></p>',
+            button_label: role === 'naive' ? 'Starten' : 'Start experiment',
         };
 
         // TODO: adapt the text of resources/informedconsent_social_de.html (see the TODOs in that file)
         var informed_consent = {
             type: jsPsychExternalHtml,
             url: "resources/informedconsent_social_de.html",
-            cont_btn: "start"
+            cont_btn: "start",
+            data: { phase: 'consent' },
         };
+        if (TEST_MODE && !consentAvailable) {
+            informed_consent = {
+                type: jsPsychHtmlButtonResponse,
+                stimulus: '<div lang="en"><p><b>Test run: the consent form has not been installed.</b></p>' +
+                    '<p>This placeholder appears only in test runs.</p></div>',
+                choices: ['Continue test'],
+                data: { phase: 'consent_test_placeholder' },
+            };
+        }
 
         // TODO: preload all stimulus images (see preload_trial in Exp2 goodness_ratings.html)
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------2. Demographics--------------------------------------------------------------------------------------------------------------------------------------------//
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        /* TODO: build a jsPsychSurvey trial (plugin-survey.js) called "demographics".
-           Template: the "demographics" trial in
-             02_pre_study_goodness_ratings/01_jspsych_Exp2_goodness_ratings/goodness_ratings.html
-           Collect (all required; use these "name"s so the data columns match Exp1 and Exp2):
-             - age                  text, numbers only
-             - gender               text
-             - monolingual_german   multi-choice Ja / Nein ("Sind Sie einsprachig mit Deutsch als einziger Muttersprache aufgewachsen?")
-             - nat_lang             text, native language(s)
-           Differences from the online pre-studies:
-             - no Prolific ID: this is a lab study; the pair ID is already stored in every row
-             - consider also asking whether the participant knows the other participant (name: 'knows_partner')
-           Do not forget to add "demographics" to the timeline in section 8. */
-        
+        // Use the pages/prompt/required API supported by the bundled plugin-survey.js.
+        // Participant only, in both real and test runs; names match the pre-studies.
         var demographics = {
             type: jsPsychSurvey,
-            survey_json: {
-                completeText: 'Weiter',
-                pages: [
-                    {
-                        elements: [
-                            {
-                                type: 'html',
-                                html: '<p><b>Vielen Dank für Ihre Teilnahme an unserem Experiment!</b></p>' +
-                                    '<p>Bevor Sie mit den Anweisungen fortfahren, benötigen wir noch ein paar Angaben zu Ihrer Person. Diese Angaben bleiben anonym.</p>'
-                            },
-                            {
-                                type: 'text',
-                                title: 'Ihr Alter (in Jahren):',
-                                name: 'age',
-                                isRequired: true,
-                                inputType: 'text'
-                            },
-                            {
-                                type: 'text',
-                                title: 'Ihr Geschlecht:',
-                                name: 'gender',
-                                isRequired: true
-                            },
-                            {
-                                type: 'radiogroup',
-                                title: 'Sind Sie einsprachig mit Deutsch als einzige Muttersprache aufgewachsen?',
-                                choices: ['Ja', 'Nein'],
-                                name: 'monolingual_german',
-                                isRequired: true
-                            },
-                            {
-                                type: 'text',
-                                title: 'Ihre Muttersprache(n):',
-                                name: 'nat_lang',
-                                isRequired: true
-                            }
-                        ]
-                    }
-                ]
-            }
+            data: { phase: 'demographics' },
+            button_label_finish: 'Weiter',
+            required_error_text: 'Bitte beantworten Sie diese Frage.',
+            pages: [[
+                {
+                    type: 'html',
+                    prompt: '<p><b>Vielen Dank für Ihre Teilnahme an unserem Experiment!</b></p>' +
+                        '<p>Bevor Sie mit den Anweisungen fortfahren, benötigen wir noch ein paar Angaben zu Ihrer Person. Diese Angaben bleiben anonym.</p>',
+                },
+                {
+                    type: 'text',
+                    prompt: 'Ihr Alter (in Jahren):',
+                    name: 'age',
+                    required: true,
+                    input_type: 'number',
+                },
+                {
+                    type: 'text',
+                    prompt: 'Ihr Geschlecht:',
+                    name: 'gender',
+                    required: true,
+                },
+                {
+                    type: 'multi-choice',
+                    prompt: 'Sind Sie einsprachig mit Deutsch als einzige Muttersprache aufgewachsen?',
+                    options: ['Ja', 'Nein'],
+                    name: 'monolingual_german',
+                    required: true,
+                },
+                {
+                    type: 'text',
+                    prompt: 'Ihre Muttersprache(n):',
+                    name: 'nat_lang',
+                    required: true,
+                },
+            ]],
         };
 
         var instruction1 = {
@@ -274,38 +302,45 @@
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------------------------------------7. Save data and free the ID-----------------------------------------------------------------------------------------------//
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        function saveData(name, data, onSuccess) {
-            $.ajax({
-                type: 'post',
-                cache: false,
-                url: PATHS.saveData,
-                data: { filename: name, filedata: data }
-            }).done(onSuccess);
-        };
-
-        function cleanupID(id) {
-            $.ajax({
-                type: 'post',
-                cache: false,
-                url: PATHS.cleanupID,
-                data: { ID: id }
-            });
-        };
-
         // One file per participant, e.g. data/social_12_naive_1760000000000.csv and
         // data/social_12_confederate_1760000000000.csv - merge the two by pair_id in the analysis.
+        // Test data stays in the browser and can be downloaded on the final screen.
         // TODO: consider also saving after each phase, so a crash in phase 3 does not lose phases 1-2.
+        var testDownloadURL;
+        var dataFilename;
         var save_data_block = {
             type: jsPsychCallFunction,
-            func: function () {
-                var filename = PATHS.filePrefix + pairID + "_" + role + "_" + Date.now() + ".csv";
-                // Only the naive participant frees the pair ID, and only once save_data.php has
-                // confirmed that the data file was written (cleanupID also re-checks on the server).
-                saveData(filename, jsPsych.data.get().csv(), function () {
-                    if (role === 'naive') cleanupID(pairID);
-                });
+            async: true,
+            func: function (done) {
+                dataFilename = (TEST_MODE ? 'TEST_social_' : PATHS.filePrefix) + sessionID + '_' + role + '_' + Date.now() + '.csv';
+                var csv = jsPsych.data.get().csv();
+                if (TEST_MODE) {
+                    testDownloadURL = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+                    done();
+                    return;
+                }
+                var saved = false;
+                async function saveAndCleanup() {
+                    var display = jsPsych.getDisplayElement();
+                    display.innerHTML = role === 'naive' ? '<p>Daten werden gespeichert …</p>' : '<p>Saving data …</p>';
+                    try {
+                        if (!saved) {
+                            await postText(PATHS.saveData, { filename: dataFilename, filedata: csv });
+                            saved = true;
+                        }
+                        // Never called in test mode; only the real participant frees the pair ID.
+                        if (role === 'naive') await postText(PATHS.cleanupID, { ID: pairID });
+                        done();
+                    } catch (error) {
+                        display.innerHTML = '<p role="alert"></p><button type="button">' + (role === 'naive' ? 'Erneut versuchen' : 'Try again') + '</button>';
+                        display.querySelector('p').textContent = (role === 'naive' ?
+                            'Speichern oder ID-Abschluss fehlgeschlagen. Bitte die Versuchsleitung informieren. ' :
+                            'Saving or ID cleanup failed. Please inform the experimenter. ') + error.message;
+                        display.querySelector('button').addEventListener('click', saveAndCleanup, { once: true });
+                    }
+                }
+                saveAndCleanup();
             },
-            timing_post_trial: 200,
         };
 
         var exit_fullscreen = {
@@ -314,12 +349,20 @@
             delay_after: 0
         };
 
-        // TODO: final text for the lab (e.g. "Bitte wenden Sie sich an die Versuchsleitung.")
         var final = {
             type: jsPsychHtmlKeyboardResponse,
-            stimulus: '<p><b>Vielen Dank für Ihre Teilnahme!</b></p>' +
-                '<p>[TODO: Abschlusstext]</p>',
+            stimulus: (role === 'naive' ? '<p><b>Vielen Dank für Ihre Teilnahme!</b></p>' +
+                '<p>Bitte wenden Sie sich an die Versuchsleitung.</p>' :
+                '<p><b>Your part is complete.</b></p><p>Please contact the experimenter.</p>') +
+                (TEST_MODE ? '<div lang="en"><p>Test data was not saved to the server.</p><a id="test-data-download">Download test data (CSV)</a></div>' : ''),
             choices: "NO_KEYS",
+            on_load: function () {
+                if (TEST_MODE) {
+                    var link = document.getElementById('test-data-download');
+                    link.href = testDownloadURL;
+                    link.download = dataFilename;
+                }
+            },
         };
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
@@ -328,8 +371,10 @@
         var timeline = [
             experimenter_screen,
             enter_fullscreen,
-            informed_consent,
-            // TODO: demographics,
+            {
+                timeline: [informed_consent, demographics],
+                conditional_function: function () { return role === 'naive'; },
+            },
             // TODO: phase 1, phase 2, phase 3,
             // TODO: questionnaire (naive participant only),
             save_data_block,
@@ -340,6 +385,8 @@
         /* start the experiment */
         jsPsych.run(timeline);
     }
+
+    ExperimentSetup.mount(document.getElementById('experiment-setup'), startExperiment);
 </script>
 
 </html>
