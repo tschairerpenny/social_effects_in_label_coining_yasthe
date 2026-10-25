@@ -19,6 +19,7 @@ var CONFIG = {
         phase1_discussion_ms: 60000,    // discussion of the two labels
         phase1_sync_lead_ms: 1500,     // future server release gives both browsers time to prepare
         phase2_feedback_ms: 2000,       // feedback after each picture selection
+        phase2_sync_lead_ms: 1500,     // shared onset of attempts and feedback
         sync_poll_interval_ms: 500,     // how often the browser asks the server for news
         sync_timeout_ms: 300000,        // allow the partner's full two-minute label-entry window
     },
@@ -30,24 +31,20 @@ var CONFIG = {
         label_policy: 'balanced',      // 8 good / 8 bad; good1-4 and bad1-4 each used twice
         max_label_length: 120,
     },
-    // TODO: trials per concept for phase 2
-    phase2_trials_per_concept: null,
-
-    // TODO: confederate behaviour in phase 2 (assertive condition), e.g. how many incorrect
-    // selections before the correct one, and the randomisation rule for that number.
-    confederate: {
-        n_incorrect_before_correct: null,
+    phase2: {
+        max_attempts: 3,
+        max_label_length: 120,
+        // No entry deadline: record time until submission for every attempt.
     },
 
     // Stimuli: one row per concept (concept_nr, concept_id, image, good1-good4, bad1-bad4), made by
     // ../00_stimuli_selection/select_stimuli_main.py. Images are in stimuli/pictures/.
     // Load and parse it like stimuli_lists.csv in Exp2 (fetchCSV + parseCSV in goodness_ratings.html).
-    // TODO: decide which label the confederate uses per concept (e.g. a fixed good label) and
-    // which images serve as distractors in phase 2 (e.g. images of other concepts).
+    // Phase 1 assigns the labels. Phase 2 reuses them; the confederate sees feedback controls.
     stimuli_file: 'stimuli/concepts.csv',
 
     // Solo-test fixtures, deliberately separate from the real confederate's behaviour.
-    // Extend this function when phase 2 introduces new message keys/response formats.
+    // Each implemented phase adds its own simulation for its message keys.
     testing: {
         partnerValue: function (key, context) {
             if (/^phase1_label_c\d+$/.test(key)) {

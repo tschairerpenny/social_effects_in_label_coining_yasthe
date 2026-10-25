@@ -85,6 +85,7 @@ async function pageFor(t, phaseOptions, localFile = false) {
     t.after(() => assert.deepEqual(errors, []));
     await page.goto(localFile ? pathToFileURL(path.join(root, 'main_social.html')).href : baseURL + '/main_social.html');
     await page.evaluate(options => {
+        if (!options || !options.phase2) Phase2.prepare = async () => ({ timeline: () => [] });
         if (!options) {
             // Startup/saving tests isolate intake from the independently tested Phase 1 task.
             Phase1.prepare = async () => ({ timeline: () => [] });
@@ -96,6 +97,23 @@ async function pageFor(t, phaseOptions, localFile = false) {
             CONFIG.timing.phase1_sync_lead_ms = 80;
             CONFIG.timing.sync_poll_interval_ms = 20;
             CONFIG.timing.sync_timeout_ms = 10000;
+            CONFIG.timing.phase2_feedback_ms = options.feedbackMs === undefined ? 500 : options.feedbackMs;
+            CONFIG.timing.phase2_sync_lead_ms = 80;
+            if (options.phase1Fixture) {
+                const preparePhase1 = Phase1.prepare.bind(Phase1);
+                Phase1.prepare = async (settings, condition) => {
+                    const controller = await preparePhase1(settings, condition);
+                    controller.results = controller.plan.trials.map(item => ({
+                        phase1_run_id: controller.plan.run_id, trial: item.trial, concept_id: item.concept_id, stimulus: item.image,
+                        participant_label: 'Phase 1 participant word ' + item.concept_id,
+                        confederate_label: item.confederate_label, confederate_assigned_label: item.confederate_label,
+                        label_slot: item.label_slot, label_quality: item.label_quality,
+                    }));
+                    controller.timeline = () => [];
+                    window.phase1Fixture = controller;
+                    return controller;
+                };
+            }
         }
     }, phaseOptions || null);
     return page;
@@ -399,10 +417,20 @@ async function startPhase1(page) {
 
 function stage(page, name) { return page.locator(`.phase1-stage[data-stage="${name}"]`); }
 
-test('paired Phase 1 completes all 16 shared pictures, keeps responses private until both submit, and records timings/choices', async t => {
+async function startPhase2(page) {
+    const role = await page.evaluate(() => PairSync.role);
+    await page.getByRole('button', { name: role === 'naive' ? 'Teil 2 starten' : 'Begin Phase 2', exact: true }).click();
+}
+
+function phase2Stage(page, name, trial, attempt) {
+    return page.locator(`.phase2-stage[data-stage="${name}"][data-trial="${trial}"][data-attempt="${attempt}"]`);
+}
+
+test('paired Phases 1 and 2 complete all 16 shared pictures and record linked labels, timings, attempts, and feedback', async t => {
     const previous = calls();
-    const a = await pageFor(t, { discussionMs: 500 });
-    const b = await pageFor(t, { discussionMs: 500 });
+    // Leave enough time to inspect transient screens on both browser contexts.
+    const a = await pageFor(t, { discussionMs: 1500, phase2: true, feedbackMs: 1000 });
+    const b = await pageFor(t, { discussionMs: 1500, phase2: true, feedbackMs: 1000 });
     await choose(a, { paired: true, condition: 'assertive' });
     await submit(a);
     const session = await a.evaluate(() => PairSync.pairID);
@@ -416,11 +444,15 @@ test('paired Phase 1 completes all 16 shared pictures, keeps responses private u
     assert.equal(await stage(a, 'waiting').locator('img').isVisible(), false);
     await startPhase1(b);
     let interrupted = false;
+    let phase2InterruptedEntry;
     await a.route('**/sync/sync.php', async route => {
         const payload = new URLSearchParams(route.request().postData());
         if (!interrupted && payload.get('action') === 'set' && payload.get('key').endsWith('_t1_label')) {
             interrupted = true;
             await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary test interruption' }) });
+        } else if (!phase2InterruptedEntry && payload.get('action') === 'set' && payload.get('key').startsWith('phase2_') && payload.get('key').endsWith('_t1_a1_label')) {
+            phase2InterruptedEntry = JSON.parse(payload.get('value'));
+            await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Phase 2 temporary test interruption' }) });
         } else await route.continue();
     });
 
@@ -465,6 +497,44 @@ test('paired Phase 1 completes all 16 shared pictures, keeps responses private u
         await a.getByRole('button', { name: 'Weiter', exact: true }).click();
         await b.getByRole('button', { name: 'Continue', exact: true }).click();
     }
+
+    await startPhase2(a);
+    await phase2Stage(a, 'waiting', 1, 1).waitFor();
+    assert.equal(await a.locator('.phase2-stage img').count(), 0);
+    await startPhase2(b);
+    const expectedPhase2 = [];
+    let assertiveIndex = 0;
+    for (const item of plan.trials) {
+        const ordinal = item.strategy === 'assertive' ? assertiveIndex++ : -1;
+        const succeedsAt = item.strategy === 'compliant' ? 1 : (ordinal === 0 ? null : ordinal === 1 ? 1 : ordinal === 2 ? 2 : 3);
+        const attempts = succeedsAt || 3;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            const expectedCorrect = item.strategy === 'compliant' || attempt === succeedsAt;
+            const label = item.strategy === 'assertive' && expectedCorrect ?
+                '  ' + item.confederate_label.toLocaleLowerCase('de-DE') + '  ' : `Anderes <b>Wort</b> ${item.trial}-${attempt}`;
+            await phase2Stage(a, 'generation', item.trial, attempt).waitFor();
+            assert.match(await a.locator('.phase2-image').getAttribute('src'), new RegExp(item.image.replace('.', '\\.')));
+            assert.equal(await a.locator('.phase2-guidance').innerText(), '');
+            await a.locator('#phase2-label').fill(label);
+            await a.getByRole('button', { name: 'Begriff abgeben', exact: true }).click();
+            if (item.trial === 1 && attempt === 1) await a.getByRole('button', { name: 'Erneut versuchen', exact: true }).click();
+            await phase2Stage(b, 'judgment', item.trial, attempt).waitFor();
+            assert.equal(await b.locator('.phase2-stage img').count(), 0);
+            assert.ok((await b.locator('.phase2-guidance').innerText()).includes(item.confederate_label));
+            assert.ok((await b.locator('.phase2-submitted-label').innerText()).includes(label.trim()));
+            assert.equal(await b.locator('.phase2-submitted-label b').count(), 0);
+            assert.equal(await b.getByRole('button', { name: expectedCorrect ? 'Correct' : 'Incorrect', exact: true }).isEnabled(), true);
+            assert.equal(await b.getByRole('button', { name: expectedCorrect ? 'Incorrect' : 'Correct', exact: true }).isEnabled(), false);
+            await b.getByRole('button', { name: expectedCorrect ? 'Correct' : 'Incorrect', exact: true }).click();
+            await Promise.all([phase2Stage(a, 'feedback', item.trial, attempt).waitFor(), phase2Stage(b, 'feedback', item.trial, attempt).waitFor()]);
+            assert.equal(await a.locator('.phase2-feedback').getAttribute('data-correct'), String(expectedCorrect));
+            assert.equal(await b.locator('.phase2-feedback').getAttribute('data-correct'), String(expectedCorrect));
+            if (item.trial === 1 && attempt === 1 && process.env.SCREENSHOT_DIR) {
+                await b.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'phase2-confederate-feedback.png'), fullPage: true });
+            }
+            expectedPhase2.push({ item, attempt, label, correct: expectedCorrect, complete: expectedCorrect || attempt === 3 });
+        }
+    }
     await Promise.all([a.locator('#test-data-download').waitFor(), b.locator('#test-data-download').waitFor()]);
     const aRows = await a.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
     const bRows = await b.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
@@ -483,13 +553,41 @@ test('paired Phase 1 completes all 16 shared pictures, keeps responses private u
         assert.equal(row.label_timed_out, false);
         assert.ok(row.participant_label_rt >= 0 && row.participant_label_rt < 5000);
         assert.ok(row.participant_choice_rt >= 0);
-        assert.ok(row.discussion_elapsed_ms >= 490);
+        assert.ok(row.discussion_elapsed_ms >= 1490);
         assert.equal(row.generation_scheduled_server_ms, other.generation_scheduled_server_ms);
         assert.equal(row.discussion_scheduled_server_ms, other.discussion_scheduled_server_ms);
         assert.equal(row.reveal_scheduled_server_ms, other.reveal_scheduled_server_ms);
     }
     const csv = await a.evaluate(async () => (await fetch(document.querySelector('#test-data-download').href)).text());
     for (const column of ['participant_label', 'participant_label_rt', 'participant_choice', 'is_filler', 'label_quality']) assert.ok(csv.includes(column));
+    const aAttempts = await a.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase2'));
+    const bAttempts = await b.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase2'));
+    assert.equal(aAttempts.length, expectedPhase2.length);
+    assert.equal(bAttempts.length, expectedPhase2.length);
+    assert.ok(phase2InterruptedEntry);
+    assert.equal(aAttempts[0].participant_label_rt, phase2InterruptedEntry.rt);
+    for (let index = 0; index < expectedPhase2.length; index++) {
+        const expected = expectedPhase2[index], row = aAttempts[index], partner = bAttempts[index];
+        const phase1 = aRows.find(previous => previous.concept_id === expected.item.concept_id);
+        assert.equal(row.concept_id, expected.item.concept_id);
+        assert.equal(row.stimulus, phase1.stimulus);
+        assert.equal(row.phase1_run_id, phase1.phase1_run_id);
+        assert.equal(row.phase1_participant_label, phase1.participant_label);
+        assert.equal(row.confederate_label, phase1.confederate_label);
+        assert.equal(row.is_filler, phase1.is_filler);
+        assert.equal(row.attempt, expected.attempt);
+        assert.equal(row.participant_label, expected.label.trim());
+        assert.equal(row.participant_label_raw, expected.label);
+        assert.equal(row.feedback_correct, expected.correct);
+        assert.equal(row.picture_complete, expected.complete);
+        assert.equal(row.end_reason, expected.correct ? 'correct' : expected.complete ? 'max_attempts' : null);
+        assert.ok(row.participant_label_rt >= 0);
+        assert.equal(row.participant_label, partner.participant_label);
+        assert.equal(row.participant_label_rt, partner.participant_label_rt);
+        assert.equal(row.feedback_correct, partner.feedback_correct);
+        assert.equal(row.feedback_scheduled_server_ms, partner.feedback_scheduled_server_ms);
+    }
+    for (const column of ['attempt', 'feedback_correct', 'phase1_confederate_label', 'participant_label_raw']) assert.ok(csv.includes(column));
     assert.deepEqual(calls(), previous);
 });
 
@@ -528,4 +626,49 @@ for (const role of ['naive', 'confederate']) {
         }
         assert.deepEqual(calls(), previous);
     });
+}
+
+for (const condition of ['assertive', 'compliant']) {
+    for (const role of ['naive', 'confederate']) {
+        test(`local-file solo Phase 2 (${condition}, ${role}) links Phase 1 labels and completes both regular and filler rules`, async t => {
+            const previous = calls();
+            const page = await pageFor(t, { count: 2, fillers: 1, phase2: true, phase1Fixture: true, feedbackMs: 0 }, true);
+            const posts = [];
+            page.on('request', request => { if (request.method() === 'POST') posts.push(request.url()); });
+            await choose(page, { role, condition });
+            await submit(page);
+            const fixture = await page.evaluate(() => ({ plan: window.phase1Fixture.plan, results: window.phase1Fixture.results }));
+            await finish(page);
+            await startPhase2(page);
+            for (const item of fixture.plan.trials) {
+                const attempts = item.strategy === 'assertive' ? 3 : 1;
+                for (let attempt = 1; attempt <= attempts; attempt++) {
+                    if (role === 'naive') {
+                        await phase2Stage(page, 'generation', item.trial, attempt).waitFor();
+                        const label = attempt === 3 ? item.confederate_label : 'Anderer Begriff';
+                        await page.locator('#phase2-label').fill(label);
+                        await page.getByRole('button', { name: 'Begriff abgeben', exact: true }).click();
+                    } else {
+                        await phase2Stage(page, 'judgment', item.trial, attempt).waitFor();
+                        assert.equal(await page.locator('.phase2-stage img').count(), 0);
+                        await page.locator('.phase2-controls button[data-correct]:enabled').click();
+                    }
+                }
+            }
+            await page.locator('#test-data-download').waitFor();
+            const rows = await page.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase2'));
+            assert.equal(rows.length, 4); // one compliant attempt plus three assertive attempts
+            for (const row of rows) {
+                const reference = fixture.results.find(previous => previous.concept_id === row.concept_id);
+                assert.equal(row.confederate_label, reference.confederate_label);
+                assert.equal(row.phase1_participant_label, reference.participant_label);
+                assert.equal(row.condition, condition);
+                assert.equal(row.feedback_correct, row.confederate_strategy === 'compliant' || row.label_matches_confederate);
+                assert.ok(row.attempt >= 1 && row.attempt <= 3);
+                assert.ok(row.participant_label_rt >= 0);
+            }
+            assert.deepEqual(posts, []);
+            assert.deepEqual(calls(), previous);
+        });
+    }
 }

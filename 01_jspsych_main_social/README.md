@@ -1,16 +1,16 @@
 # Main experiment: social influence on label adoption
 
-Two participants (a naive participant and a confederate) sit at two computers in the lab and take part in the same session. Startup, Phase 1, solo-test simulation, and browser synchronization are implemented. Phases 2/3 and the post-experiment questionnaire remain a skeleton; real ID management, server saving, and consent resources still need to be copied/adapted from the Exp2 pre-study (see below).
+Two participants (a naive participant and a confederate) sit at two computers in the lab and take part in the same session. Startup, Phases 1/2, solo-test simulation, and browser synchronization are implemented. Phase 3 and the post-experiment questionnaire remain a skeleton; real ID management, server saving, and consent resources still need to be copied/adapted from the Exp2 pre-study (see below).
 
 ## Folder structure
 
 | Path | Content | Status |
 |---|---|---|
-| `main_social.html` | The experiment timeline (jsPsych 7.2.3), startup, participant intake, Phase 1, and saving. Phases 2/3 remain `TODO`. | partly implemented |
+| `main_social.html` | The experiment timeline (jsPsych 7.2.3), startup, participant intake, Phases 1/2, and saving. Phase 3 remains `TODO`. | partly implemented |
 | `resources/experiment_config.js` | All changeable parameters: conditions, timing, trial numbers, confederate behaviour, stimuli file. | to fill in |
 | `resources/experiment_setup.js` | Experimenter-only run type, role, condition, and session entry screens. | implemented |
 | `resources/phase1.js` | Shared stimulus plan, image loading, Phase 1 screens, solo simulation, and per-picture response records. | implemented |
-| `resources/phase2.js` | Placeholder for sender-receiver behaviour, following the Phase 1 organization. | comments only |
+| `resources/phase2.js` | Sender-receiver task, Phase 1 label linkage, scripted feedback, solo simulation, and per-attempt records. | implemented |
 | `resources/phase3.js` | Placeholder for participant-only private naming, following the Phase 1 organization. | comments only |
 | `resources/pair_sync.js` | Browser communication, partner waiting, and local solo-test simulation. | implemented |
 | `sync/sync.php` | Locked shared store of both participants' responses and session condition (PHP 7.3+). | implemented |
@@ -67,7 +67,7 @@ For a **two-browser test**, serve the folder through the same PHP server on both
 
 Every data row contains `pair_id` (null in tests), `session_id`, `role`, `condition`, `test_mode`, and `connection_mode` (`solo` or `paired`). Real data filenames remain `data/social_<pair>_<role>_<timestamp>.csv`; merge the two files by `pair_id` in the analysis.
 
-**Scope of testing:** Phase 1 is implemented for both roles, including solo simulation. Its simulated partner uses the actual selected labels and each trial's current strategy. The current timeline still has TODOs for phases 2/3 and the questionnaire. Add fixtures as those tasks' message formats are defined. Simulated responses are only for checking program flow.
+**Scope of testing:** Phases 1 and 2 are implemented for both roles, including solo simulation. Their simulated partner uses the selected labels and each trial's current strategy. The current timeline still has TODOs for Phase 3 and the questionnaire. Simulated responses are only for checking program flow.
 
 ## Phase 1: stimulus selection and procedure
 
@@ -106,7 +106,38 @@ Each picture produces one `phase: 'phase1'` row in each person's CSV. Key column
 | `labels_identical`, `choice_matches_confederate_label` | Identical-word flag and whether the participant's final word equals the confederate's word. |
 | `phase1_run_id`, `*_scheduled_server_ms`, `generation_onset_server_ms` | Shared run identifier and onset timing for synchronization checks. |
 
-`phase1.results` in `main_social.html` retains these rows for the future phases 2/3. A test CSV remains a local download; real runs still use the configured research saving endpoint.
+`phase1.results` in `main_social.html` retains these rows for Phase 2 and the future Phase 3. A test CSV remains a local download; real runs still use the configured research saving endpoint.
+
+## Phase 2: sender-receiver behaviour
+
+Phase 2 follows Phase 1 and uses the **same 16 pictures in the same order**, with the same three filler assignments. It reads each concept's actual submitted confederate label from `phase1.results`, rather than selecting another label from the CSV. The participant's Phase 1 label is also retained in the Phase 2 data for comparison.
+
+The participant reads German instructions explaining that the partner sees several similar pictures. Only the participant's computer displays the target picture. The confederate's English screen shows their Phase 1 label, the participant's new label, the current strategy, and **Correct/Incorrect** buttons; it never shows a picture array or the target picture.
+
+1. The participant types a label. There is no entry deadline; response time starts when the picture/input screen appears and ends on submission. Each attempt has a fresh timer.
+2. The submitted label is sent to the confederate. In an **assertive** trial, Incorrect is required until it matches the confederate's Phase 1 label. In a **compliant** trial, Correct is required immediately, regardless of the label. Fillers reverse the base condition, just as in Phase 1.
+3. The confederate clicks the required feedback button; the other button is disabled. Matching ignores capitalization, surrounding whitespace, and equivalent Unicode composition. It does not remove punctuation, change spelling, or equate different words. The original typed text is retained separately.
+4. Both browsers reveal the feedback together. The participant sees whether the correct picture was selected, without an explanation of the scripted rule. Feedback is shown for `timing.phase2_feedback_ms` (default 2000 ms), followed by a synchronization check.
+5. Correct feedback advances to the next picture immediately. Incorrect feedback allows another attempt, up to `phase2.max_attempts` (default 3). A third incorrect answer also advances to the next picture. Skipped attempts produce no data rows.
+
+Phase 2 settings and timing are shared by the participant's browser during startup. Message keys include the Phase 1 run, picture position, and attempt number. Network retries reuse the already-recorded label and RT instead of restarting entry. In a participant-only solo test, feedback is simulated using the real rule. A confederate-only test simulates non-matching participant labels, followed by the reference label on the third attempt; compliant trials still end on attempt one.
+
+Each submitted attempt produces one `phase: 'phase2'` row in each browser's CSV, so a picture has one, two, or three rows. Key columns:
+
+| Column | Meaning |
+|---|---|
+| `trial`, `concept_id`, `stimulus` | Picture position, concept identifier, and image filename. |
+| `phase1_run_id`, `phase1_trial` | Link to the same concept/presentation in Phase 1. |
+| `phase1_participant_label`, `phase1_confederate_label`, `confederate_label` | Previous participant label and the confederate reference label from Phase 1. |
+| `attempt`, `max_attempts` | Attempt number (1, 2, or 3) and allowed maximum. |
+| `participant_label`, `participant_label_raw` | Submitted label with outside whitespace trimmed, and the original input including that whitespace. |
+| `participant_label_rt`, `label_rt`, `rt` | Time in milliseconds from this attempt's input display to submission. These columns all contain the participant's label RT. |
+| `is_filler`, `confederate_strategy`, `label_quality`, `label_slot` | Shared filler/strategy assignment and original good/bad label selection. |
+| `label_matches_confederate` | Whether the new label matches the Phase 1 confederate label under the matching rule. |
+| `feedback_correct`, `expected_feedback_correct`, `feedback_rt` | Actual/required feedback and the confederate's button-response time in milliseconds. |
+| `picture_complete`, `end_reason`, `attempts_remaining` | Whether the picture has ended; `correct`, `max_attempts`, or null; and available remaining attempts. |
+
+`phase2.results` retains these rows for later phases. Both real CSV files contain the participant's submitted labels and RTs as well as the feedback; the `role` column still identifies which browser produced the file. Existing final CSV saving and local test downloads include both phases.
 
 ## Architecture: how the two browsers communicate
 
@@ -132,7 +163,7 @@ Phase 1 uses `PairSync.synchronize(step, leadMs)`: `sync.php` waits for both bro
 - Firebase and Supabase store the data with an external (US) company. That causes data-protection problems and requires changing the consent form.
 - With two participants and a few exchanges per minute, a 0.5 s delay is not noticeable in the lab, so real-time push is not needed.
 
-**Separation of logic.** `main_social.html` builds the experiment timeline; `phase1.js` contains Phase 1 task logic. `pair_sync.js` and `sync.php` contain communication. Parameters live in `experiment_config.js`. Changing concepts, timing, trial numbers or confederate behaviour should never require touching the sync code.
+**Separation of logic.** `main_social.html` builds the experiment timeline; `phase1.js` and `phase2.js` contain their respective task logic. `pair_sync.js` and `sync.php` contain communication. Parameters live in `experiment_config.js`. Changing concepts, timing, trial numbers or confederate behaviour should never require touching the sync code.
 
 ## Before the first real session
 
@@ -146,9 +177,9 @@ Phase 1 uses `PairSync.synchronize(step, leadMs)`: `sync.php` waits for both bro
 `tests/startup.test.cjs` uses Node.js (22+), Playwright, an installed Edge browser, and PHP (7.3+). It runs against a temporary copy, with fixture consent/ID/save scripts; it does not touch research IDs or data. Install Playwright in your test environment, put `php` on PATH (or set `PHP_BINARY` to its executable), then run from this folder:
 
 ```powershell
-node --test tests/startup.test.cjs tests/phase1-plan.test.cjs
+node --test tests/startup.test.cjs tests/phase1-plan.test.cjs tests/phase2-rules.test.cjs
 ```
 
 Set `BROWSER_CHANNEL` to use another installed Playwright browser channel. The tests download the page's exact pinned CDN scripts once, so they require internet access. They check English setup/condition labels, German participant demographics and required responses, participant-only consent/demographics in test and real runs, test isolation, local CSVs, paired condition/message exchange, missing infrastructure, invalid IDs, and saving/cleanup failures.
 
-The browser suite also completes all 16 Phase 1 trials on two browsers with shortened test-only timers, checks privacy before joint reveals, filler strategies, response times, CSV columns, and both solo roles including a missing-label timeout. Startup-only tests stub Phase 1 so intake/saving checks stay focused. The plan tests use the actual CSV to check image/label selection and exact good/bad/slot/filler counts. These test overrides do not alter normal experiment durations.
+The browser suite also completes all 16 pictures through Phases 1 and 2 on two browsers with shortened test-only timers. It checks privacy, filler reversals, early success, three unsuccessful attempts, cross-phase label matching, response-time preservation on interrupted submissions, and CSV records. Solo Phase 2 tests cover both roles and conditions from a direct local HTML file using explicitly marked Phase 1 test fixtures. Startup-only tests stub the phases so intake/saving checks stay focused. The plan tests use the actual CSV to check image/label selection; Phase 2 rule tests check matching, feedback, attempt limits, and actual Phase 1 linkage. Test overrides do not alter normal experiment durations.

@@ -11,7 +11,7 @@
     type and role on the setup screens.
     Test runs never use ID management and offer a local CSV download instead of server saving.
 
-    Implemented: startup, participant consent/demographics, Phase 1, and saving.
+    Implemented: startup, participant consent/demographics, Phases 1/2, and saving.
     Real runs require the infrastructure from Exp2 (README.md, "Setting up the infrastructure").
     Solo tests work without ID/saving/sync endpoints; paired tests require the PHP sync endpoint.
     Sections marked TODO are for you to implement.
@@ -29,7 +29,6 @@
     <script src="jspsych/plugin-survey.js"></script>
     <script src="https://unpkg.com/@jspsych/plugin-call-function@1.1.2"></script>
     <script src="https://unpkg.com/@jspsych/plugin-external-html@1.1.2"></script>
-    <!-- TODO: add further plugins from jspsych/ as needed (e.g. plugin-image-button-response.js for phase 2) -->
     <!-- add style sheets -->
     <link href="jspsych/jspsych.css" rel="stylesheet" type="text/css" />
     <link href="jspsych/survey.css" rel="stylesheet" type="text/css" />
@@ -45,6 +44,7 @@
     <!-- communication with the partner's browser - the ONLY place that talks to sync/sync.php -->
     <script src="resources/pair_sync.js"></script>
     <script src="resources/phase1.js"></script>
+    <script src="resources/phase2.js"></script>
     <script src="resources/experiment_setup.js"></script>
     <style>
         [hidden] { display: none !important; }
@@ -71,6 +71,21 @@
         .phase1-controls label { display: block; }
         .phase1-controls input[type="text"] { width: min(90%, 420px); padding: 8px; font: inherit; margin: 8px; }
         .phase1-controls .jspsych-btn { margin: 8px; white-space: normal; max-width: 100%; }
+        .phase2-stage, .phase2-instructions { max-width: 900px; margin: 32px auto; padding: 12px; }
+        .phase2-instructions { text-align: left; line-height: 1.6; }
+        .phase2-stage h2 { font-size: 24px; margin: 8px; }
+        .phase2-stage p { margin: 8px 0; }
+        .phase2-counter { font-size: 15px; }
+        .phase2-image { width: clamp(200px, 30vh, 320px); height: clamp(200px, 30vh, 320px); object-fit: contain; }
+        .phase2-guidance:not(:empty) { background: #fff0be; border-left: 4px solid #a46b00; padding: 8px 16px; text-align: left; }
+        .phase2-submitted-label { font-size: 22px; overflow-wrap: anywhere; }
+        .phase2-controls label { display: block; }
+        .phase2-controls input[type="text"] { width: min(90%, 420px); padding: 8px; font: inherit; margin: 8px; }
+        .phase2-controls .jspsych-btn { margin: 8px; }
+        .phase2-controls .jspsych-btn:disabled { opacity: 0.45; cursor: default; }
+        .phase2-feedback { font-size: 24px; font-weight: bold; }
+        .phase2-feedback[data-correct="true"] { color: #176b34; }
+        .phase2-feedback[data-correct="false"] { color: #a01919; }
     </style>
 </head>
 
@@ -153,6 +168,7 @@
         condition = metadata.condition; // paired test confederate inherits the participant's choice
         if (!CONFIG.conditions.includes(condition)) throw new Error('Unknown session condition. Please check the configuration on both computers.');
         var phase1 = await Phase1.prepare(settings, condition);
+        var phase2 = await Phase2.prepare(phase1, settings);
 
         jsPsych = initJsPsych({ display_element: 'experiment' });
         document.getElementById('experiment').hidden = false;
@@ -285,10 +301,9 @@
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------4. Phase 2 - Sender-receiver picture selection (shared)----------------------------------------------------------------------------------------------------//
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        /* TODO: picture selection trials. The confederate's choices are SCRIPTED from condition and
-           CONFIG.confederate (not from the naive participant's response), except where the
-           condition says otherwise. Feedback is shown on both screens. Write the confederate's
-           behaviour as a function of (condition, trial) in a separate section so it is easy to change. */
+        // Phase 2 reuses the Phase 1 order, filler flags, and actual submitted confederate labels.
+        // Each label attempt produces its own data row; successful feedback skips later attempts.
+        // phase2.results retains these rows for analysis and the future Phase 3 implementation.
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------5. Phase 3 - Private naming (naive participant only)-------------------------------------------------------------------------------------------------------//
@@ -391,7 +406,8 @@
                 conditional_function: function () { return role === 'naive'; },
             },
             { timeline: phase1.timeline() },
-            // TODO: phase 2, phase 3,
+            { timeline: phase2.timeline() },
+            // TODO: phase 3,
             // TODO: questionnaire (naive participant only),
             save_data_block,
             exit_fullscreen,
