@@ -10,6 +10,7 @@ var PairSync = {
     condition: null,
     values: null,
     simulatePartner: null,
+    clockOffset: 0,
 
     join: async function (sessionID, role, options) {
         options = options || {};
@@ -31,6 +32,7 @@ var PairSync = {
     },
 
     request: async function (action, extra) {
+        var sentAt = Date.now();
         var response = await fetch(this.syncURL, {
             method: 'POST',
             body: new URLSearchParams(Object.assign({
@@ -49,6 +51,9 @@ var PairSync = {
             throw new Error('Synchronization is unavailable. Please use a PHP server or test alone.');
         }
         if (!response.ok || state.error) throw new Error(state.error || 'Synchronization failed.');
+        if (Number.isFinite(state.server_time_ms)) {
+            this.clockOffset = state.server_time_ms - (sentAt + Date.now()) / 2;
+        }
         return state;
     },
 
@@ -88,5 +93,21 @@ var PairSync = {
             await this.getPartnerValue(key);
         }
         if (callback) callback();
+    },
+
+    // Both browsers prepare first, then use the same future server timestamp to reveal a screen.
+    // This reduces polling skew; it is not a guarantee of millisecond-accurate simultaneous onset.
+    synchronize: async function (step, leadMs) {
+        if (this.solo) return { scheduled_server_time_ms: null };
+        var state = await this.request('ready', { step: step, lead_ms: leadMs });
+        var deadline = Date.now() + CONFIG.timing.sync_timeout_ms;
+        while (!state.barriers[step].release_at_ms) {
+            if (Date.now() >= deadline) throw new Error('Timed out waiting for the partner: ' + step);
+            await new Promise(function (resolve) { setTimeout(resolve, CONFIG.timing.sync_poll_interval_ms); });
+            state = await this.request('get');
+        }
+        var releaseAt = state.barriers[step].release_at_ms;
+        await new Promise(function (resolve) { setTimeout(resolve, Math.max(0, releaseAt - Date.now() - PairSync.clockOffset)); });
+        return { scheduled_server_time_ms: releaseAt };
     },
 };

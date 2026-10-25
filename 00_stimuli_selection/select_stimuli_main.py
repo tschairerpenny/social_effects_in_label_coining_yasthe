@@ -23,6 +23,8 @@ Run with the pilot analysis venv's python:
 """
 
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -73,6 +75,7 @@ def main():
 
     (OUT / "pictures").mkdir(parents=True, exist_ok=True)
     wide.to_csv(OUT / "concepts.csv", index=False, encoding="utf-8")
+    subprocess.run([sys.executable, str(OUT.parent / "tools" / "build_local_stimuli.py")], check=True)
     labels[["concept_id", "picture", "label_slot", "label_type", "label",
             "similarity", "novelty", "produced_as", "n_participants", "check"]] \
         .rename(columns={"picture": "image", "similarity": "siglip_cosine"}) \

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { chromium } = require('playwright');
@@ -18,7 +19,7 @@ const calls = () => fs.existsSync(path.join(root, 'calls.log')) ? fs.readFileSyn
 
 before(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'social-startup-test-'));
-    for (const name of ['main_social.html', 'jspsych', 'resources', 'sync']) {
+    for (const name of ['main_social.html', 'jspsych', 'resources', 'sync', 'stimuli']) {
         fs.cpSync(path.join(source, name), path.join(root, name), { recursive: true });
     }
     fs.mkdirSync(path.join(root, 'ID_management'));
@@ -74,7 +75,7 @@ after(async () => {
     }
 });
 
-async function pageFor(t) {
+async function pageFor(t, phaseOptions, localFile = false) {
     const context = await browser.newContext();
     t.after(() => context.close());
     await context.route('https://unpkg.com/**', route => route.fulfill({ contentType: 'application/javascript', body: cdn.get(route.request().url()) }));
@@ -82,7 +83,21 @@ async function pageFor(t) {
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     t.after(() => assert.deepEqual(errors, []));
-    await page.goto(baseURL + '/main_social.html');
+    await page.goto(localFile ? pathToFileURL(path.join(root, 'main_social.html')).href : baseURL + '/main_social.html');
+    await page.evaluate(options => {
+        if (!options) {
+            // Startup/saving tests isolate intake from the independently tested Phase 1 task.
+            Phase1.prepare = async () => ({ timeline: () => [] });
+        } else {
+            CONFIG.n_concepts = options.count || 16;
+            CONFIG.phase1.n_fillers = options.fillers === undefined ? 3 : options.fillers;
+            CONFIG.timing.phase1_label_entry_ms = options.entryMs || 5000;
+            CONFIG.timing.phase1_discussion_ms = options.discussionMs === undefined ? 300 : options.discussionMs;
+            CONFIG.timing.phase1_sync_lead_ms = 80;
+            CONFIG.timing.sync_poll_interval_ms = 20;
+            CONFIG.timing.sync_timeout_ms = 10000;
+        }
+    }, phaseOptions || null);
     return page;
 }
 
@@ -149,7 +164,7 @@ for (const role of ['naive', 'confederate']) {
         const consentRequests = [];
         page.on('request', request => { if (request.method() === 'POST') posts.push(request.url()); });
         page.on('request', request => { if (request.url().includes('/informedconsent_social_de.html')) consentRequests.push(request.url()); });
-        await choose(page, { role, condition: 'accommodating' });
+        await choose(page, { role, condition: 'compliant' });
         await submit(page);
         assert.match(await page.locator('#experiment').innerText(), /Condition: Compliant/);
         assert.equal(await page.locator('#test-mode-banner').isVisible(), true);
@@ -164,7 +179,7 @@ for (const role of ['naive', 'confederate']) {
         await link.waitFor();
         const csv = await page.evaluate(async () => (await fetch(document.querySelector('#test-data-download').href)).text());
         assert.match(csv, /test_mode/);
-        assert.match(csv, /accommodating/);
+        assert.match(csv, /compliant/);
         assert.match(csv, /test-[a-f0-9]{16}/);
         assert.match(await link.getAttribute('download'), new RegExp(`^TEST_social_test-[a-f0-9]{16}_${role}_\\d+\\.csv$`));
         const rows = await page.evaluate(() => jsPsych.data.get().values());
@@ -184,15 +199,70 @@ for (const role of ['naive', 'confederate']) {
     });
 }
 
+for (const role of ['naive', 'confederate']) {
+    test(`direct local HTML solo test (${role}) starts and completes Phase 1 without fetching local CSV or PHP`, async t => {
+        const page = await pageFor(t, { count: 2, fillers: 1, discussionMs: 0 }, true);
+        const requests = [];
+        page.on('request', request => {
+            if (request.method() === 'POST' || request.url().endsWith('/concepts.csv')) requests.push(request.url());
+        });
+        await choose(page, { role });
+        await page.getByRole('button', { name: 'Complete setup' }).click();
+        await page.waitForFunction(() => !document.querySelector('#setup-error').hidden || document.querySelector('.jspsych-html-button-response-button'));
+        assert.equal(await page.locator('#setup-error').isVisible(), false, await page.locator('#setup-error').textContent());
+        await finish(page);
+        await startPhase1(page);
+        for (let index = 0; index < 2; index++) {
+            await stage(page, 'generation').waitFor();
+            if (role === 'naive') await page.locator('#phase1-label').fill('Lokaler Begriff ' + index);
+            await page.getByRole('button', { name: role === 'naive' ? 'Begriff abgeben' : 'Submit label', exact: true }).click();
+            await stage(page, 'choice').waitFor();
+            await stage(page, 'choice').locator('button[data-source]:enabled').first().click();
+            await stage(page, 'reveal').waitFor();
+            await page.getByRole('button', { name: role === 'naive' ? 'Weiter' : 'Continue', exact: true }).click();
+        }
+        await page.locator('#test-data-download').waitFor();
+        const rows = await page.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
+        assert.equal(rows.length, 2);
+        assert.ok(rows.every(row => row.condition === 'assertive'));
+        assert.deepEqual(requests, []);
+    });
+}
+
+test('HTTP stimulus request failures show an actionable error and can be retried', async t => {
+    const page = await pageFor(t, { count: 2, fillers: 1, discussionMs: 0 });
+    await page.route('**/stimuli/concepts.csv', route => route.abort('failed'));
+    await choose(page);
+    await page.getByRole('button', { name: 'Complete setup' }).click();
+    await page.locator('#setup-error:visible').waitFor();
+    assert.match(await page.locator('#setup-error').textContent(), /Cannot load stimuli\/concepts.csv.*server connection/);
+    assert.equal(await page.getByRole('button', { name: 'Complete setup' }).isEnabled(), true);
+    await page.unroute('**/stimuli/concepts.csv');
+    await submit(page);
+});
+
+test('direct local HTML explains why real and two-browser sessions need a PHP server', async t => {
+    for (const testMode of [true, false]) {
+        const page = await pageFor(t, { count: 2, fillers: 1 }, true);
+        const posts = [];
+        page.on('request', request => { if (request.method() === 'POST') posts.push(request.url()); });
+        await choose(page, { testMode, paired: testMode });
+        await page.getByRole('button', { name: 'Complete setup' }).click();
+        await page.locator('#setup-error:visible').waitFor();
+        assert.match(await page.locator('#setup-error').textContent(), /PHP server/);
+        assert.deepEqual(posts, []);
+    }
+});
+
 test('paired tests share their condition, exchange values/barriers, and never touch real state or ID endpoints', async t => {
     const a = await pageFor(t), b = await pageFor(t);
     const previous = calls();
-    await choose(a, { paired: true, condition: 'accommodating' });
+    await choose(a, { paired: true, condition: 'compliant' });
     await submit(a);
     const session = await a.evaluate(() => PairSync.pairID);
     await choose(b, { role: 'confederate', paired: true, pair: session });
     await submit(b);
-    assert.equal(await b.evaluate(() => PairSync.condition), 'accommodating');
+    assert.equal(await b.evaluate(() => PairSync.condition), 'compliant');
     await a.evaluate(() => PairSync.sendValue('phase1_label_c1', 'Wort A'));
     assert.equal(await b.evaluate(() => PairSync.getPartnerValue('phase1_label_c1')), 'Wort A');
     await b.evaluate(() => PairSync.sendValue('phase2_feedback_c1', false));
@@ -230,7 +300,7 @@ test('real startup refuses a missing consent form before allocating an ID', asyn
 
 test('real confederate needs no consent form or demographics', async t => {
     const response = await fetch(baseURL + '/sync/sync.php', {
-        method: 'POST', body: new URLSearchParams({ action: 'join', role: 'naive', pair: '14', test: '0', condition: 'accommodating' }),
+        method: 'POST', body: new URLSearchParams({ action: 'join', role: 'naive', pair: '14', test: '0', condition: 'compliant' }),
     });
     assert.equal(response.ok, true);
     await response.json();
@@ -254,8 +324,8 @@ test('real participant allocates once; confederate joins; only participant clean
     await submit(a);
     await choose(b, { testMode: false, role: 'confederate', pair: '12' });
     await submit(b);
-    assert.equal(await a.evaluate(() => PairSync.condition), 'accommodating');
-    assert.equal(await b.evaluate(() => PairSync.condition), 'accommodating');
+    assert.equal(await a.evaluate(() => PairSync.condition), 'compliant');
+    assert.equal(await b.evaluate(() => PairSync.condition), 'compliant');
     await finish(b);
     await b.getByText('Please contact the experimenter.', { exact: true }).waitFor();
     assert.deepEqual(calls().slice(previousCount), ['allocate', 'save']);
@@ -315,9 +385,147 @@ test('empty or malformed ID responses stay on setup and never join sync', async 
 test('PHP rejects test/live identifier crossover and path traversal', async () => {
     for (const [pair, testMode] of [['12', '1'], ['test-0123456789abcdef', '0'], ['../state/pair_12', '1']]) {
         const response = await fetch(baseURL + '/sync/sync.php', {
-            method: 'POST', body: new URLSearchParams({ action: 'join', role: 'naive', pair, test: testMode, condition: 'consistent' }),
+            method: 'POST', body: new URLSearchParams({ action: 'join', role: 'naive', pair, test: testMode, condition: 'assertive' }),
         });
         assert.equal(response.status, 400);
         assert.ok((await response.json()).error);
     }
 });
+
+async function startPhase1(page) {
+    const role = await page.evaluate(() => PairSync.role);
+    await page.getByRole('button', { name: role === 'naive' ? 'Teil 1 starten' : 'Begin Phase 1', exact: true }).click();
+}
+
+function stage(page, name) { return page.locator(`.phase1-stage[data-stage="${name}"]`); }
+
+test('paired Phase 1 completes all 16 shared pictures, keeps responses private until both submit, and records timings/choices', async t => {
+    const previous = calls();
+    const a = await pageFor(t, { discussionMs: 500 });
+    const b = await pageFor(t, { discussionMs: 500 });
+    await choose(a, { paired: true, condition: 'assertive' });
+    await submit(a);
+    const session = await a.evaluate(() => PairSync.pairID);
+    const plan = await a.evaluate(() => PairSync.values.phase1_plan);
+    assert.equal(plan.trials.length, 16);
+    await choose(b, { role: 'confederate', paired: true, pair: session });
+    await submit(b);
+    await Promise.all([finish(a), finish(b)]);
+    await startPhase1(a);
+    await stage(a, 'waiting').waitFor();
+    assert.equal(await stage(a, 'waiting').locator('img').isVisible(), false);
+    await startPhase1(b);
+    let interrupted = false;
+    await a.route('**/sync/sync.php', async route => {
+        const payload = new URLSearchParams(route.request().postData());
+        if (!interrupted && payload.get('action') === 'set' && payload.get('key').endsWith('_t1_label')) {
+            interrupted = true;
+            await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary test interruption' }) });
+        } else await route.continue();
+    });
+
+    for (let index = 0; index < plan.trials.length; index++) {
+        const item = plan.trials[index];
+        await Promise.all([stage(a, 'generation').waitFor(), stage(b, 'generation').waitFor()]);
+        assert.match(await stage(a, 'generation').locator('img').getAttribute('src'), new RegExp(item.image.replace('.', '\\.')));
+        assert.equal(await stage(a, 'generation').locator('img').getAttribute('src'), await stage(b, 'generation').locator('img').getAttribute('src'));
+        assert.equal(await b.locator('#phase1-label').inputValue(), item.confederate_label);
+        assert.match(await stage(b, 'generation').locator('.phase1-guidance').innerText(), new RegExp(item.strategy === 'assertive' ? 'Assertive' : 'Compliant'));
+        assert.equal(await stage(a, 'generation').locator('.phase1-guidance').innerText(), '');
+        const word = index === 0 ? 'Eigenes <b>Wort</b>' : `Eigenes Wort ${index + 1}`;
+        await a.locator('#phase1-label').fill(word);
+        await a.getByRole('button', { name: 'Begriff abgeben', exact: true }).click();
+        if (index === 0) {
+            await a.getByRole('button', { name: 'Erneut versuchen', exact: true }).click();
+            assert.equal(await a.locator('#phase1-label').count(), 0); // retry must not restart generation/RT
+        }
+        await stage(a, 'waiting').waitFor();
+        assert.equal(await stage(a, 'waiting').locator('.phase1-labels').innerText(), '');
+        assert.equal(await stage(b, 'generation').locator('.phase1-labels').innerText(), '');
+        await b.getByRole('button', { name: 'Submit label', exact: true }).click();
+        await Promise.all([stage(a, 'discussion').waitFor(), stage(b, 'discussion').waitFor()]);
+        assert.match(await stage(a, 'discussion').locator('.phase1-labels').innerText(), new RegExp(item.confederate_label));
+        assert.ok((await stage(b, 'discussion').locator('.phase1-labels').innerText()).includes(word));
+        // Labels are rendered as text, including arbitrary user-entered markup.
+        assert.equal(await stage(b, 'discussion').locator('.phase1-labels b').count(), 0);
+        if (index === 0 && process.env.SCREENSHOT_DIR) {
+            await b.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'phase1-confederate-discussion.png'), fullPage: true });
+        }
+        await Promise.all([stage(a, 'choice').waitFor(), stage(b, 'choice').waitFor()]);
+        const expected = item.strategy === 'assertive' ? 'confederate' : 'naive';
+        assert.equal(await stage(b, 'choice').locator(`button[data-source="${expected}"]`).isEnabled(), true);
+        assert.equal(await stage(b, 'choice').locator(`button[data-source="${expected === 'naive' ? 'confederate' : 'naive'}"]`).isEnabled(), false);
+        await stage(a, 'choice').locator('button[data-source="naive"]').click();
+        await stage(a, 'waiting').waitFor();
+        assert.equal(await a.locator('[data-choice-source]').count(), 0);
+        await stage(b, 'choice').locator(`button[data-source="${expected}"]`).click();
+        await Promise.all([stage(a, 'reveal').waitFor(), stage(b, 'reveal').waitFor()]);
+        assert.ok((await a.locator('[data-choice-source="naive"]').innerText()).includes(word));
+        assert.ok((await b.locator('[data-choice-source="naive"]').innerText()).includes(word));
+        await a.getByRole('button', { name: 'Weiter', exact: true }).click();
+        await b.getByRole('button', { name: 'Continue', exact: true }).click();
+    }
+    await Promise.all([a.locator('#test-data-download').waitFor(), b.locator('#test-data-download').waitFor()]);
+    const aRows = await a.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
+    const bRows = await b.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
+    assert.equal(aRows.length, 16); assert.equal(bRows.length, 16);
+    assert.equal(interrupted, true);
+    assert.equal(aRows.filter(row => row.is_filler).length, 3);
+    assert.equal(aRows.filter(row => row.label_quality === 'good').length, 8);
+    assert.equal(aRows.filter(row => row.label_quality === 'bad').length, 8);
+    for (let index = 0; index < aRows.length; index++) {
+        const row = aRows[index], other = bRows[index];
+        assert.equal(row.stimulus, other.stimulus);
+        assert.equal(row.participant_label, other.participant_label);
+        assert.equal(row.participant_choice, row.participant_label);
+        assert.equal(row.participant_choice, other.participant_choice);
+        assert.equal(row.confederate_choice_source, row.confederate_strategy === 'assertive' ? 'confederate' : 'naive');
+        assert.equal(row.label_timed_out, false);
+        assert.ok(row.participant_label_rt >= 0 && row.participant_label_rt < 5000);
+        assert.ok(row.participant_choice_rt >= 0);
+        assert.ok(row.discussion_elapsed_ms >= 490);
+        assert.equal(row.generation_scheduled_server_ms, other.generation_scheduled_server_ms);
+        assert.equal(row.discussion_scheduled_server_ms, other.discussion_scheduled_server_ms);
+        assert.equal(row.reveal_scheduled_server_ms, other.reveal_scheduled_server_ms);
+    }
+    const csv = await a.evaluate(async () => (await fetch(document.querySelector('#test-data-download').href)).text());
+    for (const column of ['participant_label', 'participant_label_rt', 'participant_choice', 'is_filler', 'label_quality']) assert.ok(csv.includes(column));
+    assert.deepEqual(calls(), previous);
+});
+
+for (const role of ['naive', 'confederate']) {
+    test(`solo Phase 1 (${role}) completes with simulated partner, including a missing-label timeout`, async t => {
+        const previous = calls();
+        const page = await pageFor(t, { count: 2, fillers: 1, entryMs: role === 'naive' ? 500 : 5000, discussionMs: 0 });
+        await choose(page, { role, condition: 'compliant' });
+        await submit(page);
+        await finish(page);
+        await startPhase1(page);
+        for (let index = 0; index < 2; index++) {
+            await stage(page, 'generation').waitFor();
+            if (role === 'confederate') {
+                assert.equal(await page.locator('#phase1-label').getAttribute('readonly'), '');
+                await page.getByRole('button', { name: 'Submit label', exact: true }).click();
+            } else if (index === 1) {
+                await page.locator('#phase1-label').fill('Mein Wort');
+                await page.getByRole('button', { name: 'Begriff abgeben', exact: true }).click();
+            } // first participant label is deliberately left empty until the deadline
+            await stage(page, 'choice').waitFor();
+            await stage(page, 'choice').locator('button[data-source]:enabled').first().click();
+            await stage(page, 'reveal').waitFor();
+            await page.getByRole('button', { name: role === 'naive' ? 'Weiter' : 'Continue', exact: true }).click();
+        }
+        await page.locator('#test-data-download').waitFor();
+        const rows = await page.evaluate(() => jsPsych.data.get().values().filter(row => row.phase === 'phase1'));
+        assert.equal(rows.length, 2);
+        if (role === 'naive') {
+            assert.equal(rows[0].participant_label, null);
+            assert.equal(rows[0].participant_label_rt, null);
+            assert.equal(rows[0].participant_label_timed_out, true);
+            assert.equal(rows[0].strategy_fallback, 'missing_participant_label');
+            assert.equal(rows[1].participant_label, 'Mein Wort');
+            assert.equal(rows[1].participant_label_timed_out, false);
+        }
+        assert.deepEqual(calls(), previous);
+    });
+}

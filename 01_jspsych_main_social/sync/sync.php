@@ -14,7 +14,7 @@ $action = $_POST['action'] ?? '';
 $pair = $_POST['pair'] ?? '';
 $role = $_POST['role'] ?? '';
 $test = $_POST['test'] ?? '';
-if (!in_array($action, ['join', 'set', 'get'], true) || !in_array($role, ['naive', 'confederate'], true)) {
+if (!in_array($action, ['join', 'set', 'get', 'ready'], true) || !in_array($role, ['naive', 'confederate'], true)) {
     failRequest('Invalid action or role.');
 }
 if (!in_array($test, ['0', '1'], true) || !is_string($pair)) failRequest('Invalid session mode.');
@@ -27,8 +27,14 @@ if ($testMode) {
 
 $condition = $_POST['condition'] ?? '';
 if (!is_string($condition) || strlen($condition) > 100) failRequest('Invalid condition.');
+if ($condition !== '' && !in_array($condition, ['assertive', 'compliant'], true)) failRequest('Invalid condition.');
 $key = $_POST['key'] ?? '';
 $value = null;
+$step = $_POST['step'] ?? '';
+$leadMs = filter_var($_POST['lead_ms'] ?? null, FILTER_VALIDATE_INT);
+if ($action === 'ready' && (!is_string($step) || $step === '' || strlen($step) > 200 || $leadMs === false || $leadMs < 0 || $leadMs > 5000)) {
+    failRequest('Invalid synchronization step or lead time.');
+}
 if ($action === 'set') {
     if (!is_string($key) || $key === '' || strlen($key) > 200) failRequest('Invalid message key.');
     $encodedValue = $_POST['value'] ?? '';
@@ -65,6 +71,7 @@ try {
             'joined' => [],
             'naive' => [],
             'confederate' => [],
+            'barriers' => [],
         ];
     }
     if (!isset($state['meta']['condition'], $state['joined'], $state['naive'], $state['confederate']) ||
@@ -80,6 +87,17 @@ try {
         if (empty($state['joined'][$role])) throw new RuntimeException('Please join the session first.');
         if ($action === 'set') {
             $state[$role][$key] = ['value' => $value, 't' => (int)round(microtime(true) * 1000)];
+        } elseif ($action === 'ready') {
+            if (!isset($state['barriers'][$step])) {
+                $state['barriers'][$step] = ['ready' => [], 'lead_ms' => $leadMs, 'release_at_ms' => null];
+            }
+            $barrier = &$state['barriers'][$step];
+            $barrier['ready'][$role] = true;
+            $barrier['lead_ms'] = max($barrier['lead_ms'], $leadMs);
+            if ($barrier['release_at_ms'] === null && !empty($barrier['ready']['naive']) && !empty($barrier['ready']['confederate'])) {
+                $barrier['release_at_ms'] = (int)round(microtime(true) * 1000) + $barrier['lead_ms'];
+            }
+            unset($barrier);
         }
     }
     $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
@@ -89,7 +107,9 @@ try {
             throw new RuntimeException('The session could not be saved completely.');
         }
     }
-    echo $json;
+    // The response timestamp is not persisted: clients use it to estimate server clock offset.
+    $state['server_time_ms'] = (int)round(microtime(true) * 1000);
+    echo json_encode($state, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 } catch (Throwable $error) {
     http_response_code(500);
     echo json_encode(['error' => $error instanceof JsonException ? 'Cannot read the session file.' : $error->getMessage()], JSON_UNESCAPED_UNICODE);

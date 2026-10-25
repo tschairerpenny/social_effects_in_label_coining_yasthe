@@ -11,7 +11,7 @@
     type and role on the setup screens.
     Test runs never use ID management and offer a local CSV download instead of server saving.
 
-    Sections that are already written: 0 (pair ID, role, condition), 1 (fullscreen + consent), 7 (saving).
+    Implemented: startup, participant consent/demographics, Phase 1, and saving.
     Real runs require the infrastructure from Exp2 (README.md, "Setting up the infrastructure").
     Solo tests work without ID/saving/sync endpoints; paired tests require the PHP sync endpoint.
     Sections marked TODO are for you to implement.
@@ -40,8 +40,11 @@
     <script src="resources/browserCheck.js"></script>
     <!-- all changeable parameters (conditions, timing, trial numbers, confederate behaviour) -->
     <script src="resources/experiment_config.js"></script>
+    <!-- Browser-readable copy of concepts.csv for solo tests opened as a local file. -->
+    <script src="stimuli/concepts.js"></script>
     <!-- communication with the partner's browser - the ONLY place that talks to sync/sync.php -->
     <script src="resources/pair_sync.js"></script>
+    <script src="resources/phase1.js"></script>
     <script src="resources/experiment_setup.js"></script>
     <style>
         [hidden] { display: none !important; }
@@ -57,6 +60,17 @@
         #setup-error { color: #a01919; }
         #test-mode-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
             background: #fff0be; color: #563600; padding: 6px; text-align: center; font: bold 14px sans-serif; }
+        .phase1-stage, .phase1-instructions { max-width: 900px; margin: 32px auto; padding: 12px; }
+        .phase1-instructions { text-align: left; line-height: 1.6; }
+        .phase1-stage h2 { font-size: 24px; margin: 8px; }
+        .phase1-stage p { margin: 8px 0; }
+        .phase1-counter { font-size: 15px; }
+        .phase1-image { width: clamp(200px, 30vh, 320px); height: clamp(200px, 30vh, 320px); object-fit: contain; }
+        .phase1-guidance:not(:empty) { background: #fff0be; border-left: 4px solid #a46b00; padding: 8px 16px; text-align: left; }
+        .phase1-labels { font-size: 20px; }
+        .phase1-controls label { display: block; }
+        .phase1-controls input[type="text"] { width: min(90%, 420px); padding: 8px; font: inherit; margin: 8px; }
+        .phase1-controls .jspsych-btn { margin: 8px; white-space: normal; max-width: 100%; }
     </style>
 </head>
 
@@ -95,8 +109,12 @@
         var TEST_MODE = settings.testMode;
         var PATHS = LIVE_PATHS;
         var role = settings.role; // retain 'naive' internally; display 'Participant' during setup
+        var localPreview = location.protocol === 'file:';
+        if (localPreview && (!TEST_MODE || !settings.solo)) {
+            throw new Error('Real sessions and two-browser tests require a PHP server. Open the experiment through HTTP or HTTPS, or select Test run and Test alone.');
+        }
         var consentAvailable = false;
-        if (role === 'naive') {
+        if (role === 'naive' && !localPreview) {
             try {
                 var consentResponse = await fetch('resources/informedconsent_social_de.html', {
                     cache: 'no-store', signal: AbortSignal.timeout(15000),
@@ -134,6 +152,7 @@
         });
         condition = metadata.condition; // paired test confederate inherits the participant's choice
         if (!CONFIG.conditions.includes(condition)) throw new Error('Unknown session condition. Please check the configuration on both computers.');
+        var phase1 = await Phase1.prepare(settings, condition);
 
         jsPsych = initJsPsych({ display_element: 'experiment' });
         document.getElementById('experiment').hidden = false;
@@ -188,14 +207,14 @@
         if (TEST_MODE && !consentAvailable) {
             informed_consent = {
                 type: jsPsychHtmlButtonResponse,
-                stimulus: '<div lang="en"><p><b>Test run: the consent form has not been installed.</b></p>' +
+                stimulus: '<div lang="en"><p><b>Test run: consent is unavailable in this preview.</b></p>' +
                     '<p>This placeholder appears only in test runs.</p></div>',
                 choices: ['Continue test'],
                 data: { phase: 'consent_test_placeholder' },
             };
         }
 
-        // TODO: preload all stimulus images (see preload_trial in Exp2 goodness_ratings.html)
+        // The selected stimulus images were preloaded by Phase1.prepare() during setup.
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------2. Demographics--------------------------------------------------------------------------------------------------------------------------------------------//
@@ -258,14 +277,10 @@
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------3. Phase 1 - Grounding (shared)----------------------------------------------------------------------------------------------------------------------------//
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        /* TODO: for each concept (CONFIG.n_concepts):
-             1. PairSync.waitForPartner('phase1_start_c<n>')      both see the same image at the same time
-             2. label entry, max CONFIG.timing.phase1_label_entry_ms
-             3. PairSync.sendValue('phase1_label_c<n>', label)
-             4. PairSync.getPartnerValue('phase1_label_c<n>', ...) then show own label + partner label
-             5. discussion screen, CONFIG.timing.phase1_discussion_ms
-             6. choice between the two labels, then sendValue('phase1_choice_c<n>', choice)
-           Save in data: phase, trial, stimulus, response, rt, partner_label. */
+        // Phase1.prepare() loads the CSV, samples a shared 16-picture plan, assigns the
+        // confederate's labels/filler strategies, and preloads images before the experiment.
+        // Its timeline follows participant-only consent/demographics below. Phase 1 responses
+        // are in phase1.results and the jsPsych data, available to the later phases.
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------4. Phase 2 - Sender-receiver picture selection (shared)----------------------------------------------------------------------------------------------------//
@@ -375,7 +390,8 @@
                 timeline: [informed_consent, demographics],
                 conditional_function: function () { return role === 'naive'; },
             },
-            // TODO: phase 1, phase 2, phase 3,
+            { timeline: phase1.timeline() },
+            // TODO: phase 2, phase 3,
             // TODO: questionnaire (naive participant only),
             save_data_block,
             exit_fullscreen,

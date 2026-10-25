@@ -8,25 +8,32 @@
 var CONFIG = {
 
     // TODO: conditions. Recommended: assign by pair ID so the conditions stay balanced,
-    // e.g. odd pair IDs -> 'consistent', even pair IDs -> 'accommodating' (see getCondition below).
-    conditions: ['consistent', 'accommodating'],
-    // Keep existing data/session codes; display the terminology used in the experiment script.
-    condition_labels: { consistent: 'Assertive', accommodating: 'Compliant' },
+    // e.g. odd pair IDs -> 'assertive', even pair IDs -> 'compliant' (see getCondition below).
+    conditions: ['assertive', 'compliant'],
+    // Canonical condition values are used in the task, session state, and saved data.
+    condition_labels: { assertive: 'Assertive', compliant: 'Compliant' },
 
     // TODO: timing in milliseconds (values from the study description)
     timing: {
         phase1_label_entry_ms: 120000,  // time to think of and enter a label
         phase1_discussion_ms: 60000,    // discussion of the two labels
+        phase1_sync_lead_ms: 1500,     // future server release gives both browsers time to prepare
         phase2_feedback_ms: 2000,       // feedback after each picture selection
         sync_poll_interval_ms: 500,     // how often the browser asks the server for news
         sync_timeout_ms: 300000,        // allow the partner's full two-minute label-entry window
     },
 
-    // TODO: number of concepts / trials per phase
-    n_concepts: null,
+    // Random sample without replacement, selected once per pair from concepts.csv.
+    n_concepts: 16,
+    phase1: {
+        n_fillers: 3,
+        label_policy: 'balanced',      // 8 good / 8 bad; good1-4 and bad1-4 each used twice
+        max_label_length: 120,
+    },
+    // TODO: trials per concept for phase 2
     phase2_trials_per_concept: null,
 
-    // TODO: confederate behaviour in phase 2 (consistent condition), e.g. how many incorrect
+    // TODO: confederate behaviour in phase 2 (assertive condition), e.g. how many incorrect
     // selections before the correct one, and the randomisation rule for that number.
     confederate: {
         n_incorrect_before_correct: null,
@@ -48,7 +55,7 @@ var CONFIG = {
             }
             if (/^phase1_choice_c\d+$/.test(key)) {
                 var labelKey = key.replace('_choice_', '_label_');
-                if (context.role === 'naive' && context.condition === 'consistent') {
+                if (context.role === 'naive' && context.condition === 'assertive') {
                     return CONFIG.testing.partnerValue(labelKey, context);
                 }
                 return context.ownValues[labelKey] || 'Testbegriff';
