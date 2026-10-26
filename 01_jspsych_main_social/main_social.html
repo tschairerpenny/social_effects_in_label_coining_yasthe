@@ -46,6 +46,7 @@
     <script src="resources/phase1.js"></script>
     <script src="resources/phase2.js"></script>
     <script src="resources/experiment_setup.js"></script>
+    <script src="resources/test_navigation.js"></script>
     <style>
         [hidden] { display: none !important; }
         #experiment-setup { max-width: 720px; margin: 48px auto; padding: 24px; font: 18px/1.6 sans-serif; }
@@ -60,6 +61,13 @@
         #setup-error { color: #a01919; }
         #test-mode-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
             background: #fff0be; color: #563600; padding: 6px; text-align: center; font: bold 14px sans-serif; }
+        #test-phase-navigation { position: fixed; top: 40px; right: 12px; z-index: 10001;
+            max-width: min(320px, calc(100vw - 48px)); padding: 10px; border: 1px solid #a46b00;
+            border-radius: 4px; background: #fff8df; color: #563600; font: 14px/1.5 sans-serif; }
+        #test-phase-navigation summary { cursor: pointer; font-weight: bold; }
+        #test-phase-navigation select, #test-phase-navigation button { font: inherit; margin: 8px 0; }
+        #test-phase-navigation small { display: block; }
+        #test-phase-navigation [role="status"]:empty { display: none; }
         .phase1-stage, .phase1-instructions { max-width: 900px; margin: 32px auto; padding: 12px; }
         .phase1-instructions { text-align: left; line-height: 1.6; }
         .phase1-stage h2 { font-size: 24px; margin: 8px; }
@@ -92,6 +100,7 @@
 <body>
     <main id="experiment-setup" lang="en"></main>
     <aside id="test-mode-banner" lang="en" hidden></aside>
+    <aside id="test-phase-navigation" lang="en" hidden></aside>
     <main id="experiment" hidden></main>
 </body>
 
@@ -122,6 +131,7 @@
 
     async function startExperiment(settings) {
         var TEST_MODE = settings.testMode;
+        var startPhase = TEST_MODE && settings.navigation ? settings.navigation.phase : 'setup';
         var PATHS = LIVE_PATHS;
         var role = settings.role; // retain 'naive' internally; display 'Participant' during setup
         var localPreview = location.protocol === 'file:';
@@ -147,7 +157,8 @@
         var sessionID;
         var condition;
         if (TEST_MODE) {
-            sessionID = settings.solo || role === 'naive' ? ExperimentSetup.createTestSession() : settings.pair;
+            sessionID = settings.navigation ? settings.navigation.sessionID :
+                (settings.solo || role === 'naive' ? ExperimentSetup.createTestSession() : settings.pair);
             condition = settings.condition;
         } else {
             var ID = role === 'naive' ? await postText(PATHS.manageID, {}) : settings.pair;
@@ -168,6 +179,7 @@
         condition = metadata.condition; // paired test confederate inherits the participant's choice
         if (!CONFIG.conditions.includes(condition)) throw new Error('Unknown session condition. Please check the configuration on both computers.');
         var phase1 = await Phase1.prepare(settings, condition);
+        if (startPhase === 'phase2') TestNavigation.seedPhase1(phase1);
         var phase2 = await Phase2.prepare(phase1, settings);
 
         jsPsych = initJsPsych({ display_element: 'experiment' });
@@ -188,6 +200,10 @@
             test_mode: TEST_MODE,
             connection_mode: settings.solo ? 'solo' : 'paired',
         });
+        if (TEST_MODE) {
+            jsPsych.data.addProperties({ test_start_phase: startPhase, phase1_test_fixture: startPhase === 'phase2' });
+            TestNavigation.mount(document.getElementById('test-phase-navigation'), settings, phase1);
+        }
 
         // Shown only to the experimenter before the participant sits down: the pair ID that has to
         // be entered on the confederate's setup screen (a temporary session code for paired tests).
@@ -398,27 +414,41 @@
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
         //------------------------------------------------8. Timeline-------------------------------------------------------------------------------------------------------------------//
         //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
-        var timeline = [
-            experimenter_screen,
-            enter_fullscreen,
+        var timeline = startPhase === 'setup' ? [experimenter_screen, enter_fullscreen] : [];
+        if (startPhase === 'setup' || startPhase === 'intake') timeline.push(
             {
                 timeline: [informed_consent, demographics],
                 conditional_function: function () { return role === 'naive'; },
-            },
-            { timeline: phase1.timeline() },
-            { timeline: phase2.timeline() },
+            }
+        );
+        if (startPhase !== 'phase2' && startPhase !== 'finish') timeline.push({ timeline: phase1.timeline() });
+        if (startPhase !== 'finish') timeline.push({ timeline: phase2.timeline() });
+        timeline.push(
             // TODO: phase 3,
             // TODO: questionnaire (naive participant only),
             save_data_block,
             exit_fullscreen,
             final
-        ];
+        );
 
         /* start the experiment */
         jsPsych.run(timeline);
     }
 
-    ExperimentSetup.mount(document.getElementById('experiment-setup'), startExperiment);
+    var setupRoot = document.getElementById('experiment-setup');
+    var pendingTest = TestNavigation.takePending();
+    if (pendingTest) {
+        setupRoot.textContent = 'Preparing test phase preview ...';
+        startExperiment(pendingTest).then(function () { setupRoot.hidden = true; }).catch(function (error) {
+            ExperimentSetup.mount(setupRoot, startExperiment);
+            var message = document.createElement('p');
+            message.setAttribute('role', 'alert');
+            message.textContent = 'Could not open the test phase: ' + error.message;
+            setupRoot.prepend(message);
+        });
+    } else {
+        ExperimentSetup.mount(setupRoot, startExperiment);
+    }
 </script>
 
 </html>

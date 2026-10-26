@@ -150,7 +150,9 @@ var Phase1 = {
     prepare: async function (settings, condition) {
         var rows = await this.loadStimuli(settings);
         var plan;
-        if (settings.solo || settings.role === 'naive') {
+        if (settings.testMode && settings.navigation) {
+            plan = settings.navigation.plan;
+        } else if (settings.solo || settings.role === 'naive') {
             plan = this.makePlan(rows, condition);
             if (!settings.solo) await PairSync.sendValue('phase1_plan', plan);
         } else plan = await PairSync.getPartnerValue('phase1_plan');

@@ -69,6 +69,8 @@ Every data row contains `pair_id` (null in tests), `session_id`, `role`, `condit
 
 **Scope of testing:** Phases 1 and 2 are implemented for both roles, including solo simulation. Their simulated partner uses the selected labels and each trial's current strategy. The current timeline still has TODOs for Phase 3 and the questionnaire. Simulated responses are only for checking program flow.
 
+During a test run, open **Test: jump to phase** in the top-right corner, select consent/demographics (participant only), Phase 1, Phase 2, or the CSV download screen, then click **Go**. Each jump reloads the page into a fresh preview and clears the current test responses. The role, condition, and selected pictures stay the same. Jumping directly to Phase 2 supplies simulated Phase 1 labels, marked by `phase1_test_fixture: true` in the test CSV. In two-browser tests, select the same destination and click Go on both computers; the browsers share a new run identifier before restarting, so earlier messages are not reused. These controls are hidden during real data collection.
+
 ## Phase 1: stimulus selection and procedure
 
 The participant's browser samples **16 distinct pictures from the 20 rows in `stimuli/concepts.csv`**, shuffles their order, and publishes one shared plan. The confederate downloads that plan instead of sampling independently. A solo test creates the same kind of plan locally, for either role. The research pair ID determines the base condition, not the picture set.
@@ -177,7 +179,7 @@ Phase 1 uses `PairSync.synchronize(step, leadMs)`: `sync.php` waits for both bro
 `tests/startup.test.cjs` uses Node.js (22+), Playwright, an installed Edge browser, and PHP (7.3+). It runs against a temporary copy, with fixture consent/ID/save scripts; it does not touch research IDs or data. Install Playwright in your test environment, put `php` on PATH (or set `PHP_BINARY` to its executable), then run from this folder:
 
 ```powershell
-node --test tests/startup.test.cjs tests/phase1-plan.test.cjs tests/phase2-rules.test.cjs
+node --test tests/startup.test.cjs tests/phase1-plan.test.cjs tests/phase2-rules.test.cjs tests/test-navigation.test.cjs
 ```
 
 Set `BROWSER_CHANNEL` to use another installed Playwright browser channel. The tests download the page's exact pinned CDN scripts once, so they require internet access. They check English setup/condition labels, German participant demographics and required responses, participant-only consent/demographics in test and real runs, test isolation, local CSVs, paired condition/message exchange, missing infrastructure, invalid IDs, and saving/cleanup failures.
